@@ -2,15 +2,21 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const mongoose = require("mongoose");
 const { Server } = require("socket.io");
-const { connectDB } = require("./db"); // <-- Add this
 
 const buildRoutes = require("./routes");
 
 const PORT = process.env.PORT || 5000;
-const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "http://localhost:5173, http://10.124.220.3:5173")
+const MONGO_URI = process.env.MONGO_URI;
+const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",")
   .map((s) => s.trim());
+
+if (!MONGO_URI) {
+  console.error("MONGO_URI is not set - check your environment variables.");
+  process.exit(1);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -21,9 +27,6 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
   },
 });
-
-// Connect to Database
-connectDB(); // <-- Add this
 
 app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(express.json());
@@ -46,6 +49,25 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Smart Helmet backend running on http://localhost:${PORT}`);
+// Connect to MongoDB first - only start accepting HTTP requests once the
+// database connection is confirmed, so we fail fast and loudly instead of
+// silently hanging on every /api/* request.
+mongoose
+  .connect(MONGO_URI)
+  .then(() => {
+    console.log("MongoDB connected");
+    server.listen(PORT, () => {
+      console.log(`Smart Helmet backend running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("MongoDB connection failed:", err.message);
+    process.exit(1);
+  });
+
+mongoose.connection.on("error", (err) => {
+  console.error("MongoDB runtime error:", err.message);
+});
+mongoose.connection.on("disconnected", () => {
+  console.warn("MongoDB disconnected");
 });
