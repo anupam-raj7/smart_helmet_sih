@@ -1,0 +1,1684 @@
+// ============================================================
+// SMART HELMET - ESP32
+// ============================================================
+//
+// FEATURES
+// ------------------------------------------------------------
+// 1. MPU6050 crash detection
+// 2. MH-FMD LOW-TRIGGER buzzer
+// 3. Buzzer ON for 15 seconds after crash
+// 4. Cancel button
+// 5. False-alarm notification to backend
+// 6. MQ-3 alcohol monitoring
+// 7. GPS location (optional)
+// 8. WiFi + HTTP backend communication
+//
+// BUZZER:
+//     LOW  -> ON
+//     HIGH -> OFF
+//
+// MPU6050:
+//     Crash if acceleration magnitude > 2.0 G
+//
+// MQ-3:
+//     Completely independent from buzzer
+//
+// ============================================================
+
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+
+// ============================================================
+// WIFI CONFIGURATION
+// ============================================================
+
+const char* WIFI_SSID = "realme 12 5G";
+
+const char* WIFI_PASSWORD = "prince3010";
+
+
+// ------------------------------------------------------------
+// IMPORTANT
+//
+// Replace this with the IP address of the computer running
+// your backend.
+//
+// Example:
+//
+// const char* BACKEND_HOST = "192.168.1.100";
+//
+// DO NOT USE:
+// localhost
+// 127.0.0.1
+// ------------------------------------------------------------
+
+const char* BACKEND_HOST = "10.124.220.3";
+
+const int BACKEND_PORT = 5000;
+
+
+// ============================================================
+// HELMET CONFIGURATION
+// ============================================================
+
+const char* HELMET_ID = "H001";
+
+
+// ============================================================
+// MPU6050 CONFIGURATION
+// ============================================================
+
+#define MPU6050_ADDR 0x68
+
+#define SDA_PIN 21
+#define SCL_PIN 22
+
+#define PWR_MGMT_1   0x6B
+#define ACCEL_XOUT_H 0x3B
+#define WHO_AM_I     0x75
+
+
+// ============================================================
+// CRASH CONFIGURATION
+// ============================================================
+
+// Crash threshold
+
+const float CRASH_THRESHOLD_G = 1.5;
+
+
+// After a crash, ignore another crash for 5 seconds.
+//
+// This prevents one physical impact from generating
+// many crash events.
+
+const unsigned long ALERT_COOLDOWN_MS = 5000;
+
+
+// ============================================================
+// CRASH STATE
+// ============================================================
+
+// TRUE when a crash alert is currently active.
+
+bool alertActive = false;
+
+
+// IMPORTANT:
+// This was missing in the previous version.
+//
+// Stores the time at which the last crash was detected.
+
+unsigned long lastAlertAt = 0;
+
+
+// ============================================================
+// CANCEL BUTTON
+// ============================================================
+
+#define CANCEL_BUTTON_PIN 26
+
+const unsigned long BUTTON_DEBOUNCE_MS = 250;
+
+unsigned long lastCancelPress = 0;
+
+
+// ============================================================
+// MH-FMD BUZZER
+// ============================================================
+//
+// MH-FMD LOW TRIGGER
+//
+// GPIO LOW  -> BUZZER ON
+// GPIO HIGH -> BUZZER OFF
+//
+// ============================================================
+
+#define BUZZER_PIN 27
+
+
+// Buzzer duration = 15 seconds
+
+const unsigned long BUZZER_DURATION_MS = 15000;
+
+
+// Buzzer state
+
+bool buzzerActive = false;
+
+
+// Time when buzzer was started
+
+unsigned long buzzerStartedAt = 0;
+
+
+// ============================================================
+// LOCATION CONFIGURATION
+// ============================================================
+
+// Send location every 30 seconds
+
+const unsigned long LOCATION_INTERVAL_MS = 30000;
+
+unsigned long lastLocationAt = 0;
+
+
+// ============================================================
+// GPS CONFIGURATION
+// ============================================================
+
+// 0 = GPS disabled
+// 1 = GPS enabled
+
+#define USE_GPS 0
+
+
+#if USE_GPS
+
+#include <TinyGPSPlus.h>
+
+TinyGPSPlus gps;
+
+#define GPS_SERIAL Serial2
+
+#define GPS_BAUD 9600
+
+#endif
+
+
+// ------------------------------------------------------------
+// Fallback location
+// ------------------------------------------------------------
+
+const double FALLBACK_LAT = 22.2561;
+
+const double FALLBACK_LON = 84.9045;
+
+
+// ============================================================
+// MQ-3 CONFIGURATION
+// ============================================================
+
+#define MQ3_PIN 34
+
+
+// ------------------------------------------------------------
+// MQ-3 threshold
+//
+// ESP32 12-bit ADC:
+//
+// 0    = minimum
+// 4095 = maximum
+//
+// This value MUST be calibrated for your sensor.
+// ------------------------------------------------------------
+
+const int ALCOHOL_THRESHOLD = 400;
+
+
+// ------------------------------------------------------------
+// Clear threshold
+//
+// Hysteresis prevents rapid ON/OFF switching.
+// ------------------------------------------------------------
+
+const int ALCOHOL_CLEAR_THRESHOLD = 350;
+
+
+// ------------------------------------------------------------
+// MQ-3 read interval
+// ------------------------------------------------------------
+
+const unsigned long MQ3_READ_INTERVAL_MS = 100;
+
+
+// ------------------------------------------------------------
+// Periodic MQ-3 status
+// ------------------------------------------------------------
+
+const unsigned long ALCOHOL_STATUS_INTERVAL_MS = 15000;
+
+
+// ------------------------------------------------------------
+// Alcohol alert cooldown
+// ------------------------------------------------------------
+
+const unsigned long ALCOHOL_ALERT_COOLDOWN_MS = 60000;
+
+
+// ============================================================
+// MQ-3 STATE
+// ============================================================
+
+int mq3Value = 0;
+
+bool alcoholDetected = false;
+
+bool previousAlcoholDetected = false;
+
+
+// ============================================================
+// MQ-3 TIMERS
+// ============================================================
+
+unsigned long lastMQ3ReadAt = 0;
+
+unsigned long lastAlcoholStatusAt = 0;
+
+unsigned long lastAlcoholAlertAt = 0;
+
+
+// ============================================================
+// MPU6050 VALUES
+// ============================================================
+
+float ax = 0.0;
+
+float ay = 0.0;
+
+float az = 0.0;
+
+float gx = 0.0;
+
+float gy = 0.0;
+
+float gz = 0.0;
+
+float temperature = 0.0;
+
+
+// ============================================================
+// BUZZER ON
+// ============================================================
+
+void buzzerOn()
+{
+    // Use tone() to support both Passive and Active buzzers
+    tone(BUZZER_PIN, 1000);
+
+    buzzerActive = true;
+
+    buzzerStartedAt = millis();
+
+    Serial.println(
+        "BUZZER ON - 15 second timer started"
+    );
+}
+
+
+// ============================================================
+// BUZZER OFF
+// ============================================================
+
+void buzzerOff()
+{
+    noTone(BUZZER_PIN);
+
+    // Ensure it is HIGH so LOW-TRIGGER modules turn off
+    digitalWrite(
+        BUZZER_PIN,
+        HIGH
+    );
+
+    buzzerActive = false;
+
+    Serial.println(
+        "BUZZER OFF"
+    );
+}
+
+
+// ============================================================
+// BUZZER TIMER
+// ============================================================
+//
+// This function is called continuously from loop().
+//
+// It does NOT use delay(15000), so the ESP32 can continue
+// reading MPU6050, MQ-3, buttons, GPS and WiFi.
+//
+// ============================================================
+
+void updateBuzzer()
+{
+    if (!buzzerActive)
+    {
+        return;
+    }
+
+
+    unsigned long now = millis();
+
+
+    if (
+        now - buzzerStartedAt
+        >= BUZZER_DURATION_MS
+    )
+    {
+        buzzerOff();
+
+        Serial.println(
+            "15 seconds completed - buzzer stopped"
+        );
+    }
+}
+
+
+// ============================================================
+// MPU6050 WRITE REGISTER
+// ============================================================
+
+void writeRegister(
+    uint8_t reg,
+    uint8_t value
+)
+{
+    Wire.beginTransmission(
+        MPU6050_ADDR
+    );
+
+    Wire.write(reg);
+
+    Wire.write(value);
+
+    Wire.endTransmission();
+}
+
+
+// ============================================================
+// MPU6050 READ REGISTER
+// ============================================================
+
+uint8_t readRegister(
+    uint8_t reg
+)
+{
+    Wire.beginTransmission(
+        MPU6050_ADDR
+    );
+
+    Wire.write(reg);
+
+    Wire.endTransmission(false);
+
+
+    Wire.requestFrom(
+        (uint8_t)MPU6050_ADDR,
+        (uint8_t)1
+    );
+
+
+    if (Wire.available())
+    {
+        return Wire.read();
+    }
+
+
+    return 0;
+}
+
+
+// ============================================================
+// READ 16-BIT MPU VALUE
+// ============================================================
+
+int16_t read16()
+{
+    int16_t value;
+
+
+    value =
+        ((int16_t)Wire.read() << 8);
+
+
+    value |=
+        Wire.read();
+
+
+    return value;
+}
+
+
+// ============================================================
+// READ MPU6050
+// ============================================================
+
+void readMPU6050()
+{
+    Wire.beginTransmission(
+        MPU6050_ADDR
+    );
+
+
+    Wire.write(
+        ACCEL_XOUT_H
+    );
+
+
+    Wire.endTransmission(false);
+
+
+    Wire.requestFrom(
+        (uint8_t)MPU6050_ADDR,
+        (uint8_t)14
+    );
+
+
+    if (Wire.available() < 14)
+    {
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // ACCELEROMETER
+    // --------------------------------------------------------
+
+    int16_t accelX = read16();
+
+    int16_t accelY = read16();
+
+    int16_t accelZ = read16();
+
+
+    // --------------------------------------------------------
+    // TEMPERATURE
+    // --------------------------------------------------------
+
+    int16_t tempRaw = read16();
+
+
+    // --------------------------------------------------------
+    // GYROSCOPE
+    // --------------------------------------------------------
+
+    int16_t gyroX = read16();
+
+    int16_t gyroY = read16();
+
+    int16_t gyroZ = read16();
+
+
+    // --------------------------------------------------------
+    // Convert accelerometer
+    //
+    // ±2G range
+    // 16384 LSB/G
+    // --------------------------------------------------------
+
+    ax =
+        accelX / 16384.0;
+
+    ay =
+        accelY / 16384.0;
+
+    az =
+        accelZ / 16384.0;
+
+
+    // --------------------------------------------------------
+    // Convert gyroscope
+    //
+    // ±250 degrees/sec
+    // --------------------------------------------------------
+
+    gx =
+        gyroX / 131.0;
+
+    gy =
+        gyroY / 131.0;
+
+    gz =
+        gyroZ / 131.0;
+
+
+    // --------------------------------------------------------
+    // Convert temperature
+    // --------------------------------------------------------
+
+    temperature =
+        (tempRaw / 340.0)
+        + 36.53;
+}
+
+
+// ============================================================
+// ACCELERATION MAGNITUDE
+// ============================================================
+
+float accelMagnitudeG()
+{
+    return sqrt(
+        ax * ax +
+        ay * ay +
+        az * az
+    );
+}
+
+
+// ============================================================
+// GET GPS LOCATION
+// ============================================================
+
+bool getLocation(
+    double &lat,
+    double &lon
+)
+{
+
+#if USE_GPS
+
+    // --------------------------------------------------------
+    // Read GPS serial data
+    // --------------------------------------------------------
+
+    while (
+        GPS_SERIAL.available() > 0
+    )
+    {
+        gps.encode(
+            GPS_SERIAL.read()
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // Check GPS fix
+    // --------------------------------------------------------
+
+    if (
+        gps.location.isValid()
+    )
+    {
+        lat =
+            gps.location.lat();
+
+        lon =
+            gps.location.lng();
+
+        return true;
+    }
+
+#endif
+
+
+    // --------------------------------------------------------
+    // GPS unavailable
+    // --------------------------------------------------------
+
+    lat =
+        FALLBACK_LAT;
+
+    lon =
+        FALLBACK_LON;
+
+
+    return false;
+}
+
+
+// ============================================================
+// HTTP POST JSON
+// ============================================================
+
+bool postJson(
+    const char* path,
+    JsonDocument &doc
+)
+{
+    // --------------------------------------------------------
+    // Check WiFi
+    // --------------------------------------------------------
+
+    if (
+        WiFi.status()
+        != WL_CONNECTED
+    )
+    {
+        Serial.println(
+            "WiFi not connected"
+        );
+
+        return false;
+    }
+
+
+    // --------------------------------------------------------
+    // Create HTTP client
+    // --------------------------------------------------------
+
+    HTTPClient http;
+
+
+    // --------------------------------------------------------
+    // Build backend URL
+    // --------------------------------------------------------
+
+    String url =
+        String("http://")
+        +
+        BACKEND_HOST
+        +
+        ":"
+        +
+        BACKEND_PORT
+        +
+        path;
+
+
+    Serial.print(
+        "POST: "
+    );
+
+    Serial.println(
+        url
+    );
+
+
+    // --------------------------------------------------------
+    // Start connection
+    // --------------------------------------------------------
+
+    http.begin(url);
+
+
+    http.addHeader(
+        "Content-Type",
+        "application/json"
+    );
+
+
+    // --------------------------------------------------------
+    // Convert JSON to string
+    // --------------------------------------------------------
+
+    String body;
+
+
+    serializeJson(
+        doc,
+        body
+    );
+
+
+    Serial.print(
+        "Body: "
+    );
+
+    Serial.println(
+        body
+    );
+
+
+    // --------------------------------------------------------
+    // Send request
+    // --------------------------------------------------------
+
+    int httpCode =
+        http.POST(body);
+
+
+    Serial.print(
+        "HTTP response: "
+    );
+
+    Serial.println(
+        httpCode
+    );
+
+
+    // --------------------------------------------------------
+    // Error
+    // --------------------------------------------------------
+
+    if (httpCode <= 0)
+    {
+        Serial.print(
+            "HTTP error: "
+        );
+
+        Serial.println(
+            http.errorToString(
+                httpCode
+            )
+        );
+    }
+
+
+    http.end();
+
+
+    return (
+        httpCode >= 200
+        &&
+        httpCode < 300
+    );
+}
+
+
+// ============================================================
+// SEND CRASH
+// ============================================================
+
+void sendCrash(
+    float impactG,
+    double lat,
+    double lon
+)
+{
+    JsonDocument doc;
+
+
+    doc["helmet_id"] =
+        HELMET_ID;
+
+
+    doc["impact_g"] =
+        impactG;
+
+
+    doc["lat"] =
+        lat;
+
+
+    doc["lon"] =
+        lon;
+
+
+    doc["event"] =
+        "crash";
+
+
+    postJson(
+        "/api/crash",
+        doc
+    );
+}
+
+
+// ============================================================
+// SEND CANCEL / FALSE ALARM
+// ============================================================
+
+void sendCancel()
+{
+    JsonDocument doc;
+
+
+    doc["helmet_id"] =
+        HELMET_ID;
+
+
+    doc["status"] =
+        "false_alarm";
+
+
+    doc["event"] =
+        "cancel";
+
+
+    doc["message"] =
+        "Crash alert cancelled by user";
+
+
+    postJson(
+        "/api/cancel",
+        doc
+    );
+}
+
+
+// ============================================================
+// SEND LOCATION
+// ============================================================
+
+void sendLocation(
+    double lat,
+    double lon
+)
+{
+    JsonDocument doc;
+
+
+    doc["helmet_id"] =
+        HELMET_ID;
+
+
+    doc["lat"] =
+        lat;
+
+
+    doc["lon"] =
+        lon;
+
+
+    postJson(
+        "/api/location",
+        doc
+    );
+}
+
+
+// ============================================================
+// READ MQ-3
+// ============================================================
+
+int readMQ3()
+{
+    return analogRead(
+        MQ3_PIN
+    );
+}
+
+
+// ============================================================
+// SEND ALCOHOL EVENT
+// ============================================================
+
+void sendAlcoholEvent(
+    int value,
+    bool detected,
+    const char* event
+)
+{
+    JsonDocument doc;
+
+
+    doc["helmet_id"] =
+        HELMET_ID;
+
+
+    doc["value"] =
+        value;
+
+
+    doc["status"] =
+        detected ? "flagged" : "normal";
+
+
+    postJson(
+        "/api/alcohol",
+        doc
+    );
+}
+
+
+// ============================================================
+// PROCESS MQ-3
+// ============================================================
+//
+// IMPORTANT:
+//
+// MQ-3 DOES NOT CONTROL THE BUZZER.
+//
+// ============================================================
+
+void processMQ3(
+    unsigned long now
+)
+{
+    // --------------------------------------------------------
+    // Read MQ-3 periodically
+    // --------------------------------------------------------
+
+    if (
+        now - lastMQ3ReadAt
+        >= MQ3_READ_INTERVAL_MS
+    )
+    {
+        lastMQ3ReadAt =
+            now;
+
+
+        mq3Value =
+            readMQ3();
+
+
+        // ----------------------------------------------------
+        // HYSTERESIS
+        // ----------------------------------------------------
+
+        if (!alcoholDetected)
+        {
+            // CLEAR -> DETECTED
+
+            if (
+                mq3Value
+                >= ALCOHOL_THRESHOLD
+            )
+            {
+                alcoholDetected =
+                    true;
+            }
+        }
+
+        else
+        {
+            // DETECTED -> CLEAR
+
+            if (
+                mq3Value
+                <= ALCOHOL_CLEAR_THRESHOLD
+            )
+            {
+                alcoholDetected =
+                    false;
+            }
+        }
+
+
+        // ----------------------------------------------------
+        // Detect state change
+        // ----------------------------------------------------
+
+        if (
+            alcoholDetected
+            != previousAlcoholDetected
+        )
+        {
+
+            // ------------------------------------------------
+            // ALCOHOL DETECTED
+            // ------------------------------------------------
+
+            if (alcoholDetected)
+            {
+                Serial.println();
+                Serial.println(
+                    "!!! ALCOHOL DETECTED !!!"
+                );
+
+
+                Serial.print(
+                    "MQ-3 value: "
+                );
+
+
+                Serial.println(
+                    mq3Value
+                );
+
+
+                sendAlcoholEvent(
+                    mq3Value,
+                    true,
+                    "detected"
+                );
+            }
+
+
+            // ------------------------------------------------
+            // ALCOHOL CLEARED
+            // ------------------------------------------------
+
+            else
+            {
+                Serial.println(
+                    "Alcohol level cleared"
+                );
+
+
+                Serial.print(
+                    "MQ-3 value: "
+                );
+
+
+                Serial.println(
+                    mq3Value
+                );
+
+
+                sendAlcoholEvent(
+                    mq3Value,
+                    false,
+                    "cleared"
+                );
+            }
+
+
+            previousAlcoholDetected =
+                alcoholDetected;
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // Periodic status
+    // --------------------------------------------------------
+
+    if (
+        now - lastAlcoholStatusAt
+        >=
+        ALCOHOL_STATUS_INTERVAL_MS
+    )
+    {
+        lastAlcoholStatusAt =
+            now;
+
+
+        Serial.print(
+            "MQ-3: "
+        );
+
+        Serial.print(
+            mq3Value
+        );
+
+
+        Serial.print(
+            " | Alcohol: "
+        );
+
+
+        Serial.println(
+            alcoholDetected
+                ? "YES"
+                : "NO"
+        );
+
+
+        sendAlcoholEvent(
+            mq3Value,
+            alcoholDetected,
+            "status"
+        );
+    }
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+    // ========================================================
+    // SERIAL
+    // ========================================================
+
+    Serial.begin(
+        115200
+    );
+
+
+    delay(1000);
+
+
+    Serial.println();
+
+    Serial.println(
+        "=========================================="
+    );
+
+    Serial.println(
+        "          SMART HELMET - ESP32"
+    );
+
+    Serial.println(
+        "=========================================="
+    );
+
+
+    // ========================================================
+    // I2C
+    // ========================================================
+
+    Wire.begin(
+        SDA_PIN,
+        SCL_PIN
+    );
+
+
+    // ========================================================
+    // MPU6050
+    // ========================================================
+
+    writeRegister(
+        PWR_MGMT_1,
+        0x00
+    );
+
+
+    delay(100);
+
+
+    uint8_t whoAmI =
+        readRegister(
+            WHO_AM_I
+        );
+
+
+    Serial.print(
+        "MPU6050 WHO_AM_I: 0x"
+    );
+
+
+    Serial.println(
+        whoAmI,
+        HEX
+    );
+
+
+    if (
+        whoAmI == 0x68
+    )
+    {
+        Serial.println(
+            "MPU6050 detected!"
+        );
+    }
+
+    else
+    {
+        Serial.println(
+            "WARNING: MPU6050 not detected!"
+        );
+    }
+
+
+    // ========================================================
+    // CANCEL BUTTON
+    // ========================================================
+
+    pinMode(
+        CANCEL_BUTTON_PIN,
+        INPUT_PULLUP
+    );
+
+
+    // ========================================================
+    // BUZZER
+    // ========================================================
+
+    pinMode(
+        BUZZER_PIN,
+        OUTPUT
+    );
+
+
+    // --------------------------------------------------------
+    // IMPORTANT
+    //
+    // MH-FMD LOW TRIGGER
+    //
+    // HIGH = OFF
+    // --------------------------------------------------------
+
+    buzzerOff();
+
+
+    // ========================================================
+    // MQ-3
+    // ========================================================
+
+    pinMode(
+        MQ3_PIN,
+        INPUT
+    );
+
+
+    analogReadResolution(
+        12
+    );
+
+
+    Serial.println(
+        "MQ-3 initialized"
+    );
+
+
+    Serial.print(
+        "Alcohol threshold: "
+    );
+
+
+    Serial.println(
+        ALCOHOL_THRESHOLD
+    );
+
+
+    Serial.print(
+        "Alcohol clear threshold: "
+    );
+
+
+    Serial.println(
+        ALCOHOL_CLEAR_THRESHOLD
+    );
+
+
+    // ========================================================
+    // GPS
+    // ========================================================
+
+#if USE_GPS
+
+    GPS_SERIAL.begin(
+        GPS_BAUD,
+        SERIAL_8N1,
+        16,
+        17
+    );
+
+
+    Serial.println(
+        "GPS enabled"
+    );
+
+#else
+
+    Serial.println(
+        "GPS disabled"
+    );
+
+    Serial.println(
+        "Using fallback coordinates"
+    );
+
+#endif
+
+
+    // ========================================================
+    // WIFI
+    // ========================================================
+
+    Serial.print(
+        "Connecting to WiFi"
+    );
+
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+
+    while (
+        WiFi.status()
+        != WL_CONNECTED
+    )
+    {
+        delay(500);
+
+        Serial.print(".");
+    }
+
+
+    Serial.println();
+
+
+    Serial.println(
+        "WiFi connected!"
+    );
+
+
+    Serial.print(
+        "ESP32 IP: "
+    );
+
+
+    Serial.println(
+        WiFi.localIP()
+    );
+
+
+    Serial.print(
+        "Backend: http://"
+    );
+
+
+    Serial.print(
+        BACKEND_HOST
+    );
+
+
+    Serial.print(
+        ":"
+    );
+
+
+    Serial.println(
+        BACKEND_PORT
+    );
+
+
+    // ========================================================
+    // INITIAL MQ-3 READING
+    // ========================================================
+
+    mq3Value =
+        readMQ3();
+
+
+    Serial.print(
+        "Initial MQ-3 value: "
+    );
+
+
+    Serial.println(
+        mq3Value
+    );
+
+
+    if (
+        mq3Value
+        >= ALCOHOL_THRESHOLD
+    )
+    {
+        alcoholDetected =
+            true;
+    }
+
+    else
+    {
+        alcoholDetected =
+            false;
+    }
+
+
+    previousAlcoholDetected =
+        alcoholDetected;
+
+
+    Serial.print(
+        "Initial alcohol state: "
+    );
+
+
+    Serial.println(
+        alcoholDetected
+            ? "DETECTED"
+            : "CLEAR"
+    );
+
+
+    Serial.println();
+
+    Serial.println(
+        "SMART HELMET READY"
+    );
+
+
+    Serial.println(
+        "=========================================="
+    );
+}
+
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop()
+{
+    // ========================================================
+    // CURRENT TIME
+    // ========================================================
+
+    unsigned long now =
+        millis();
+
+
+    // ========================================================
+    // READ MPU6050
+    // ========================================================
+
+    readMPU6050();
+
+
+    // ========================================================
+    // GET LOCATION
+    // ========================================================
+
+    double lat;
+
+    double lon;
+
+
+    getLocation(
+        lat,
+        lon
+    );
+
+
+    // ========================================================
+    // CRASH DETECTION
+    // ========================================================
+
+    float magnitude =
+        accelMagnitudeG();
+
+
+    // --------------------------------------------------------
+    // Check cooldown
+    // --------------------------------------------------------
+
+    bool cooldownOver =
+        (
+            now - lastAlertAt
+            >=
+            ALERT_COOLDOWN_MS
+        );
+
+
+    // --------------------------------------------------------
+    // Crash condition
+    // --------------------------------------------------------
+
+    if (
+        magnitude
+        > CRASH_THRESHOLD_G
+        &&
+        cooldownOver
+    )
+    {
+        Serial.println();
+
+        Serial.println(
+            "=========================================="
+        );
+
+
+        Serial.println(
+            "!!! CRASH DETECTED !!!"
+        );
+
+
+        Serial.print(
+            "Acceleration: "
+        );
+
+
+        Serial.print(
+            magnitude
+        );
+
+
+        Serial.println(
+            " G"
+        );
+
+
+        Serial.println(
+            "Starting buzzer for 15 seconds..."
+        );
+
+
+        Serial.println(
+            "=========================================="
+        );
+
+
+        // ----------------------------------------------------
+        // IMPORTANT:
+        // Update lastAlertAt
+        // ----------------------------------------------------
+
+        lastAlertAt =
+            now;
+
+
+        // ----------------------------------------------------
+        // Mark alert active
+        // ----------------------------------------------------
+
+        alertActive =
+            true;
+
+
+        // ----------------------------------------------------
+        // START BUZZER
+        // ----------------------------------------------------
+
+        buzzerOn();
+
+
+        // ----------------------------------------------------
+        // SEND CRASH TO BACKEND
+        // ----------------------------------------------------
+
+        sendCrash(
+            magnitude,
+            lat,
+            lon
+        );
+    }
+
+
+    // ========================================================
+    // CANCEL BUTTON
+    // ========================================================
+
+    if (
+        digitalRead(
+            CANCEL_BUTTON_PIN
+        )
+        == LOW
+        &&
+        (
+            now - lastCancelPress
+            >=
+            BUTTON_DEBOUNCE_MS
+        )
+    )
+    {
+
+        lastCancelPress =
+            now;
+
+
+        // ----------------------------------------------------
+        // Only cancel if an alert exists
+        // ----------------------------------------------------
+
+        if (
+            alertActive
+            ||
+            buzzerActive
+        )
+        {
+            Serial.println();
+
+            Serial.println(
+                "=========================================="
+            );
+
+
+            Serial.println(
+                "CANCEL BUTTON PRESSED"
+            );
+
+
+            Serial.println(
+                "FALSE ALARM"
+            );
+
+
+            Serial.println(
+                "Stopping buzzer..."
+            );
+
+
+            Serial.println(
+                "=========================================="
+            );
+
+
+            // ------------------------------------------------
+            // STOP BUZZER IMMEDIATELY
+            // ------------------------------------------------
+
+            buzzerOff();
+
+
+            // ------------------------------------------------
+            // SEND FALSE ALARM
+            // ------------------------------------------------
+
+            sendCancel();
+
+
+            // ------------------------------------------------
+            // CLEAR ALERT
+            // ------------------------------------------------
+
+            alertActive =
+                false;
+        }
+    }
+
+
+    // ========================================================
+    // LOCATION HEARTBEAT
+    // ========================================================
+
+    if (
+        now - lastLocationAt
+        >=
+        LOCATION_INTERVAL_MS
+    )
+    {
+        sendLocation(
+            lat,
+            lon
+        );
+
+
+        lastLocationAt =
+            now;
+    }
+
+
+    // ========================================================
+    // MQ-3
+    // ========================================================
+
+    processMQ3(
+        now
+    );
+
+
+    // ========================================================
+    // BUZZER TIMER
+    // ========================================================
+    //
+    // This automatically turns the buzzer OFF after 15 sec.
+    //
+    // MQ-3 has NO connection to this function.
+    //
+    // ========================================================
+
+    updateBuzzer();
+
+
+    // ========================================================
+    // SMALL DELAY
+    // ========================================================
+
+    delay(50);
+}

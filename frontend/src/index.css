@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-bg: #f8fafc;
+  --color-brand-surface: rgba(255, 255, 255, 0.35);
+  --color-brand-panel: rgba(255, 255, 255, 0.45);
+  --color-brand-accent: #0ea5e9;
+  --color-brand-accent-dark: #0284c7;
+  --color-brand-accent-purple: #8b5cf6;
+  --color-status-ok: #10b981;
+  --color-status-warning: #f59e0b;
+  --color-status-critical: #ef4444;
+  --color-status-info: #3b82f6;
+  --color-text-primary: #1e293b;
+  --color-text-secondary: #64748b;
+  --color-border-subtle: rgba(255, 255, 255, 0.6);
+  --color-border-accent: rgba(14, 165, 233, 0.3);
+
+  --font-family-sans: "Inter", sans-serif;
+  --font-family-mono: "JetBrains Mono", monospace;
+}
+
+body {
+  background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 50%, #eff6ff 100%);
+  background-attachment: fixed;
+  color: var(--color-text-primary);
+  font-family: var(--font-family-sans);
+  margin: 0;
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Layer 1: Background & Layer 2: Tech Grid */
+body::before {
+  content: "";
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image: 
+    linear-gradient(to right, rgba(14, 165, 233, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(14, 165, 233, 0.05) 1px, transparent 1px);
+  background-size: 64px 64px;
+  z-index: -5;
+  pointer-events: none;
+}
+
+/* Map Overrides */
+.leaflet-container {
+  background: var(--color-brand-surface) !important;
+  border-radius: 12px;
+}
+
+/* Panels */
+.tech-panel {
+  background: var(--color-brand-panel);
+  border: 1px solid var(--color-border-subtle);
+  border-top-color: rgba(255, 255, 255, 0.9);
+  border-left-color: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-radius: 16px;
+  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  position: relative;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.tech-panel:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 15px 45px -10px rgba(14, 165, 233, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.tech-panel-critical {
+  background: rgba(254, 226, 226, 0.6);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  box-shadow: 0 10px 40px -10px rgba(239, 68, 68, 0.15);
+  animation: critical-pulse 2s infinite;
+}
+
+@keyframes critical-pulse {
+  0%, 100% { box-shadow: 0 10px 40px -10px rgba(239, 68, 68, 0.15); }
+  50% { box-shadow: 0 15px 45px -10px rgba(239, 68, 68, 0.3); border-color: var(--color-status-critical); }
+}
+
+/* Utilities */
+.font-mono {
+  font-family: var(--font-family-mono);
+}
+
+.text-glow-accent {
+  text-shadow: 0 0 15px rgba(14, 165, 233, 0.4);
+}
+
+.text-glow-critical {
+  text-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
+}
+
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.animate-pulse-slow {
+  animation: pulse-op 4s ease-in-out infinite;
+}
+@keyframes pulse-op {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* Custom Scrollbar for Event Log and Stats */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-brand-accent);
+}
